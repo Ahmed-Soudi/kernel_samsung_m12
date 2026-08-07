@@ -1,0 +1,107 @@
+name: Build M127F Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            python3 \
+            zip \
+            unzip
+
+      - name: Download Android Clang
+        run: |
+          mkdir -p $HOME/toolchain
+
+          curl -L \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
+            -o /tmp/clang.tar.gz
+
+          tar -xf /tmp/clang.tar.gz -C $HOME/toolchain
+
+      - name: Integrate latest KernelSU Next legacy
+        run: |
+          rm -rf KernelSU-Next
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s legacy
+
+      - name: Configure kernel
+        run: |
+          export PATH="$HOME/toolchain/bin:$PATH"
+          export ARCH=arm64
+          export PLATFORM_VERSION=13
+          export ANDROID_MAJOR_VERSION=t
+
+          make ARCH=arm64 exynos850-m12nsxx_defconfig
+
+      - name: Build kernel
+        run: |
+          export PATH="$HOME/toolchain/bin:$PATH"
+          export ARCH=arm64
+          export PLATFORM_VERSION=13
+          export ANDROID_MAJOR_VERSION=t
+
+          make ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            -j$(nproc)
+
+      - name: Find kernel image
+        run: |
+          find arch/arm64/boot -maxdepth 2 -type f \
+            \( -name "Image" -o \
+               -name "Image.gz" -o \
+               -name "Image.gz-dtb" \) \
+            -ls
+
+      - name: Package AnyKernel3
+        run: |
+          rm -rf output
+          mkdir output
+
+          cp -a anykernel/. output/
+
+          if [ -f arch/arm64/boot/Image ]; then
+            cp arch/arm64/boot/Image output/Image
+          elif [ -f arch/arm64/boot/Image.gz-dtb ]; then
+            cp arch/arm64/boot/Image.gz-dtb output/Image
+          elif [ -f arch/arm64/boot/Image.gz ]; then
+            cp arch/arm64/boot/Image.gz output/Image
+          else
+            echo "Kernel image not found"
+            exit 1
+          fi
+
+          cd output
+          zip -r ../M127F-KSUN-Latest.zip .
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: M127F-KSUN-Latest
+          path: M127F-KSUN-Latest.zip
