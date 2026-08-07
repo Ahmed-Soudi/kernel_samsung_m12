@@ -31,16 +31,6 @@ jobs:
             zip \
             unzip
 
-      - name: Download Android Clang
-        run: |
-          mkdir -p $HOME/toolchain
-
-          curl -L \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
-            -o /tmp/clang.tar.gz
-
-          tar -xf /tmp/clang.tar.gz -C $HOME/toolchain
-
       - name: Integrate latest KernelSU Next legacy
         run: |
           rm -rf KernelSU-Next
@@ -49,58 +39,42 @@ jobs:
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
-      - name: Configure kernel
+      - name: Configure M127F kernel
         run: |
-          export PATH="$HOME/toolchain/bin:$PATH"
-          export ARCH=arm64
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
+          export ARCH=arm64
 
           make ARCH=arm64 exynos850-m12nsxx_defconfig
 
-      - name: Build kernel
+      - name: Build M127F kernel
         run: |
-          export PATH="$HOME/toolchain/bin:$PATH"
-          export ARCH=arm64
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
+          export ARCH=arm64
 
-          make ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            -j$(nproc)
+          make ARCH=arm64 -j$(nproc)
 
-      - name: Find kernel image
+      - name: Verify kernel image
         run: |
-          find arch/arm64/boot -maxdepth 2 -type f \
-            \( -name "Image" -o \
-               -name "Image.gz" -o \
-               -name "Image.gz-dtb" \) \
-            -ls
+          ls -lh arch/arm64/boot/
 
-      - name: Package AnyKernel3
+          test -f arch/arm64/boot/Image
+
+      - name: Prepare AnyKernel
         run: |
           rm -rf output
           mkdir output
 
           cp -a anykernel/. output/
+          cp arch/arm64/boot/Image output/Image
 
-          if [ -f arch/arm64/boot/Image ]; then
-            cp arch/arm64/boot/Image output/Image
-          elif [ -f arch/arm64/boot/Image.gz-dtb ]; then
-            cp arch/arm64/boot/Image.gz-dtb output/Image
-          elif [ -f arch/arm64/boot/Image.gz ]; then
-            cp arch/arm64/boot/Image.gz output/Image
-          else
-            echo "Kernel image not found"
-            exit 1
-          fi
-
+      - name: Create flashable ZIP
+        run: |
           cd output
           zip -r ../M127F-KSUN-Latest.zip .
 
-      - name: Upload kernel
+      - name: Upload kernel ZIP
         uses: actions/upload-artifact@v4
         with:
           name: M127F-KSUN-Latest
