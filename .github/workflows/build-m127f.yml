@@ -8,13 +8,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout kernel
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -31,13 +31,25 @@ jobs:
             zip \
             unzip
 
-      - name: Integrate latest KernelSU Next legacy
+      - name: Update KernelSU Next submodule
         run: |
-          rm -rf KernelSU-Next
+          cd KernelSU-Next
 
-          curl -LSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            | bash -s legacy
+          echo "=== KernelSU remotes ==="
+          git remote -v
+
+          echo "=== Available branches ==="
+          git fetch origin
+          git branch -a
+
+          echo "=== Switching to latest legacy branch ==="
+          git checkout -B legacy origin/legacy
+
+          echo "=== KernelSU commit being used ==="
+          git rev-parse HEAD
+          git log -1 --oneline
+
+          cd ..
 
       - name: Configure M127F kernel
         run: |
@@ -46,6 +58,14 @@ jobs:
           export ARCH=arm64
 
           make ARCH=arm64 exynos850-m12nsxx_defconfig
+
+      - name: Show KernelSU config
+        run: |
+          echo "=== KernelSU-related config ==="
+          grep -iE "KSU|KERNELSU" .config || true
+
+          echo "=== SUSFS-related config ==="
+          grep -i "SUSFS" .config || true
 
       - name: Build M127F kernel
         run: |
@@ -57,25 +77,46 @@ jobs:
 
       - name: Verify kernel image
         run: |
-          ls -lh arch/arm64/boot/
+          echo "=== arch/arm64/boot contents ==="
+          ls -lah arch/arm64/boot/
+
+          echo "=== Searching for kernel images ==="
+          find arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            \( \
+              -name "Image" \
+              -o -name "Image.gz" \
+              -o -name "Image.gz-dtb" \
+            \) \
+            -ls
 
           test -f arch/arm64/boot/Image
 
-      - name: Prepare AnyKernel
+      - name: Prepare AnyKernel package
         run: |
           rm -rf output
-          mkdir output
+          mkdir -p output
 
           cp -a anykernel/. output/
           cp arch/arm64/boot/Image output/Image
+
+          echo "=== AnyKernel package contents ==="
+          ls -lah output/
 
       - name: Create flashable ZIP
         run: |
           cd output
           zip -r ../M127F-KSUN-Latest.zip .
 
-      - name: Upload kernel ZIP
+      - name: Upload flashable kernel ZIP
         uses: actions/upload-artifact@v4
         with:
           name: M127F-KSUN-Latest
           path: M127F-KSUN-Latest.zip
+
+      - name: Upload build config
+        uses: actions/upload-artifact@v4
+        with:
+          name: M127F-Kernel-Config
+          path: .config
