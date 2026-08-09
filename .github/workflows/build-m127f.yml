@@ -69,6 +69,31 @@ jobs:
 
           cd ..
 
+      - name: Fix strscpy_pad compatibility for Samsung 4.19
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("KernelSU-Next/kernel/compat/kernel_compat.h")
+          s = p.read_text()
+
+          old = "return strscpy_pad(dest, src, count);"
+          new = "return __strscpy_pad(dest, src, count);"
+
+          if old not in s:
+              raise SystemExit(
+                  "Expected strscpy_pad compatibility line not found"
+              )
+
+          p.write_text(s.replace(old, new, 1))
+
+          print("Patched kernel_compat.h for Samsung Linux 4.19")
+          PY
+
+          echo "=== Patched compatibility code ==="
+          grep -n -A6 -B6 "__strscpy_pad" \
+            KernelSU-Next/kernel/compat/kernel_compat.h
+
       - name: Configure M127F kernel
         run: |
           export PATH="$HOME/toolchain/bin:$PATH"
@@ -140,6 +165,7 @@ jobs:
           echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
 
+          echo "=== Searching for kernel images ==="
           find arch/arm64/boot \
             -maxdepth 2 \
             -type f \
