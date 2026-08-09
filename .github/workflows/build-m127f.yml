@@ -17,6 +17,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
@@ -29,7 +30,26 @@ jobs:
             libssl-dev \
             python3 \
             zip \
-            unzip
+            unzip \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: Download Android Clang r383902
+        run: |
+          mkdir -p "$HOME/toolchain"
+
+          curl -L \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
+            -o /tmp/clang-r383902.tar.gz
+
+          tar -xf /tmp/clang-r383902.tar.gz \
+            -C "$HOME/toolchain"
+
+          echo "=== Clang version ==="
+          "$HOME/toolchain/bin/clang" --version
+
+          echo "=== AArch64 GNU linker ==="
+          aarch64-linux-gnu-ld --version | head
 
       - name: Update KernelSU Next submodule
         run: |
@@ -38,14 +58,12 @@ jobs:
           echo "=== KernelSU remotes ==="
           git remote -v
 
-          echo "=== Available branches ==="
           git fetch origin
-          git branch -a
 
           echo "=== Switching to latest legacy branch ==="
           git checkout -B legacy origin/legacy
 
-          echo "=== KernelSU commit being used ==="
+          echo "=== KernelSU commit ==="
           git rev-parse HEAD
           git log -1 --oneline
 
@@ -53,34 +71,75 @@ jobs:
 
       - name: Configure M127F kernel
         run: |
+          export PATH="$HOME/toolchain/bin:$PATH"
+
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
           export ARCH=arm64
 
-          make ARCH=arm64 exynos850-m12nsxx_defconfig
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            exynos850-m12nsxx_defconfig
 
       - name: Show KernelSU config
         run: |
-          echo "=== KernelSU-related config ==="
+          echo "=== KernelSU config ==="
           grep -iE "KSU|KERNELSU" .config || true
 
-          echo "=== SUSFS-related config ==="
+          echo "=== SUSFS config ==="
           grep -i "SUSFS" .config || true
+
+      - name: Verify compiler environment
+        run: |
+          export PATH="$HOME/toolchain/bin:$PATH"
+
+          echo "=== clang ==="
+          which clang
+          clang --version
+
+          echo "=== linker ==="
+          which aarch64-linux-gnu-ld
+          aarch64-linux-gnu-ld --version | head
+
+          echo "=== assembler ==="
+          which aarch64-linux-gnu-as
+          aarch64-linux-gnu-as --version | head
+
+          echo "=== compiler target test ==="
+          echo | clang \
+            --target=aarch64-linux-gnu \
+            -dM -E - \
+            | grep -E "__aarch64__|__AARCH64"
 
       - name: Build M127F kernel
         run: |
+          export PATH="$HOME/toolchain/bin:$PATH"
+
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
           export ARCH=arm64
 
-          make ARCH=arm64 -j$(nproc)
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            -j$(nproc)
 
       - name: Verify kernel image
         run: |
-          echo "=== arch/arm64/boot contents ==="
+          echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
 
-          echo "=== Searching for kernel images ==="
           find arch/arm64/boot \
             -maxdepth 2 \
             -type f \
@@ -101,7 +160,7 @@ jobs:
           cp -a anykernel/. output/
           cp arch/arm64/boot/Image output/Image
 
-          echo "=== AnyKernel package contents ==="
+          echo "=== AnyKernel contents ==="
           ls -lah output/
 
       - name: Create flashable ZIP
