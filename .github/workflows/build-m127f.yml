@@ -77,21 +77,27 @@ jobs:
           p = Path("KernelSU-Next/kernel/compat/kernel_compat.h")
           s = p.read_text()
 
-          old = "return strscpy_pad(dest, src, count);"
-          new = "return __strscpy_pad(dest, src, count);"
+          old = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 222)
+              return strscpy_pad(dest, src, count);
+          #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
+
+          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+              return strscpy_pad(dest, src, count);
+          #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
 
           if old not in s:
               raise SystemExit(
-                  "Expected strscpy_pad compatibility line not found"
+                  "Expected strscpy_pad compatibility block not found"
               )
 
           p.write_text(s.replace(old, new, 1))
 
-          print("Patched kernel_compat.h for Samsung Linux 4.19")
+          print("Forced Samsung 4.19 to use KSUN strscpy fallback")
           PY
 
-          echo "=== Patched compatibility code ==="
-          grep -n -A6 -B6 "__strscpy_pad" \
+          echo "=== Patched strscpy compatibility code ==="
+          grep -n -A15 -B3 \
+            "static inline ssize_t __strscpy_pad" \
             KernelSU-Next/kernel/compat/kernel_compat.h
 
       - name: Configure M127F kernel
