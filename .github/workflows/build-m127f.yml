@@ -109,22 +109,21 @@ jobs:
           grep -n "KSU_FEATURE_SELINUX_HIDE" \
             KernelSU-Next/kernel/feature/selinux_hide.c
 
+          echo "=== SELinux Hide build integration ==="
+          grep -n "feature/selinux_hide.o" \
+            KernelSU-Next/kernel/Kbuild
+
           echo "=== SELinux Hide LSM integration ==="
           grep -n "ksu_lsm_hook" \
-            KernelSU-Next/kernel/feature/selinux_hide.c || true
+            KernelSU-Next/kernel/feature/selinux_hide.c
 
           echo "=== SELinux write_op integration ==="
           grep -n 'find_kernel_symbol_exact("write_op")' \
-            KernelSU-Next/kernel/feature/selinux_hide.c || true
+            KernelSU-Next/kernel/feature/selinux_hide.c
 
-          echo "=== SELinux Hide source references ==="
-          grep -R -n "selinux_hide" \
-            KernelSU-Next/kernel \
-            2>/dev/null | head -n 100 || true
+          echo "=== Native SELinux Hide verified in v3.3.0 ==="
 
-          echo "=== Native SELinux Hide source verified in v3.3.0 ==="
-
-      - name: Configure M127F kernel
+      - name: Configure M127F base kernel
         run: |
           set -euxo pipefail
 
@@ -144,6 +143,43 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             exynos850-m12nsxx_defconfig
 
+          echo "=== Base config generated ==="
+
+      - name: Enable KSUN v3.3.0 requirements
+        run: |
+          set -euxo pipefail
+
+          export PATH="$HOME/toolchain/bin:$PATH"
+
+          export PLATFORM_VERSION=13
+          export ANDROID_MAJOR_VERSION=t
+          export ARCH=arm64
+
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "=== Before enabling KSUN requirements ==="
+          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
+
+          test -x scripts/config
+
+          echo "=== Enable KPROBES ==="
+          scripts/config --enable KPROBES
+
+          echo "=== Enable KernelSU ==="
+          scripts/config --enable KSU
+
+          echo "=== Resolve dependencies ==="
+          make ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+          echo "=== After enabling KSUN requirements ==="
+          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
+
       - name: Verify M127F and KernelSU configuration
         run: |
           set -euxo pipefail
@@ -157,17 +193,13 @@ jobs:
           echo "=== Kprobe config ==="
           grep -i "KPROBE" .config || true
 
-          echo "=== SUSFS config ==="
-          grep -i "SUSFS" .config || true
+          echo "=== EXT4 config ==="
+          grep '^CONFIG_EXT4_FS=' .config || true
 
-          echo "=== Required KernelSU setting ==="
+          echo "=== Required settings ==="
+          grep '^CONFIG_KPROBES=y$' .config
+          grep '^CONFIG_EXT4_FS=y$' .config
           grep '^CONFIG_KSU=y$' .config
-
-          echo "=== Manual hook setting ==="
-          grep '^CONFIG_KSU_MANUAL_HOOK=y$' .config || true
-
-          echo "=== KPM setting ==="
-          grep '^CONFIG_KPM=y$' .config || true
 
           echo "=== Configuration verification complete ==="
 
@@ -238,8 +270,7 @@ jobs:
             echo "$SELINUX_HIDE_OBJECT"
             ls -lh "$SELINUX_HIDE_OBJECT"
           else
-            echo "ERROR: Native SELinux Hide source exists but no compiled object was found."
-            echo "KernelSU may not actually have been linked into this build."
+            echo "ERROR: selinux_hide.c exists but selinux_hide.o was not built."
             exit 1
           fi
 
@@ -247,22 +278,18 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== KernelSU build products ==="
-
-          find . \
-            -type f \
-            \( \
-              -name "kernelsu.o" \
-              -o -name "built-in.a" \
-              -o -name "*ksu*.o" \
-            \) \
-            2>/dev/null | grep -E "KernelSU|kernelsu" | head -n 100 || true
-
           echo "=== drivers/kernelsu ==="
           ls -la drivers/kernelsu
 
-          echo "=== KernelSU feature directory ==="
-          ls -la drivers/kernelsu/feature || true
+          echo "=== KernelSU build products ==="
+          find . \
+            -type f \
+            \( \
+              -name "*ksu*.o" \
+              -o -name "*kernelsu*.o" \
+              -o -name "selinux_hide.o" \
+            \) \
+            -print 2>/dev/null | head -n 150 || true
 
       - name: Verify kernel image
         run: |
