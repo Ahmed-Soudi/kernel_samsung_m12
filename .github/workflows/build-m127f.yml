@@ -65,7 +65,7 @@ jobs:
 
           git -C KernelSU-Next fetch --tags --force origin
 
-          echo "=== Remove stale drivers/kernelsu link if present ==="
+          echo "=== Remove stale drivers/kernelsu link ==="
           rm -rf drivers/kernelsu
 
           echo "=== Run official KSUN v3.3.0 setup ==="
@@ -86,13 +86,10 @@ jobs:
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/Makefile
 
-          echo "=== Verify Makefile integration ==="
           grep -n "kernelsu" drivers/Makefile
-
-          echo "=== Verify Kconfig integration ==="
           grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
 
-          echo "=== KernelSU-Next v3.3.0 integrated successfully ==="
+          echo "=== KernelSU-Next v3.3.0 integrated ==="
 
       - name: Verify native SELinux Hide is present
         run: |
@@ -113,24 +110,29 @@ jobs:
           grep -n "feature/selinux_hide.o" \
             KernelSU-Next/kernel/Kbuild
 
-          echo "=== SELinux Hide LSM integration ==="
+          echo "=== SELinux Hide LSM hook ==="
           grep -n "ksu_lsm_hook" \
             KernelSU-Next/kernel/feature/selinux_hide.c
 
-          echo "=== SELinux write_op integration ==="
+          echo "=== SELinux write_op handling ==="
           grep -n 'find_kernel_symbol_exact("write_op")' \
             KernelSU-Next/kernel/feature/selinux_hide.c
 
-          echo "=== Native SELinux Hide verified in v3.3.0 ==="
+          echo "=== Native SELinux Hide verified ==="
 
       - name: Apply Samsung 4.19 KSUN compatibility fixes
         run: |
           set -euxo pipefail
 
-          echo "=== Target kernel header compatibility ==="
+          echo "========================================="
+          echo " Samsung 4.19 compatibility preparation"
+          echo "========================================="
+
+          echo
+          echo "=== Compatibility #1: linux/pgtable.h ==="
 
           if [ ! -f include/linux/pgtable.h ]; then
-            echo "Samsung 4.19 has no include/linux/pgtable.h"
+            echo "Samsung kernel does not provide include/linux/pgtable.h"
 
             if grep -q '^#include <linux/pgtable.h>$' \
                  KernelSU-Next/kernel/feature/sucompat.c; then
@@ -142,18 +144,63 @@ jobs:
               echo "Removed unused linux/pgtable.h include from sucompat.c"
             fi
           else
-            echo "linux/pgtable.h exists; no compatibility patch required"
+            echo "linux/pgtable.h exists; no patch required"
           fi
 
-          echo "=== Verify sucompat includes after patch ==="
-          head -n 30 KernelSU-Next/kernel/feature/sucompat.c
+          echo
+          echo "=== Compatibility #2: strncpy_from_user_nofault ==="
 
-          if [ ! -f include/linux/pgtable.h ]; then
-            ! grep -q '^#include <linux/pgtable.h>$' \
-              KernelSU-Next/kernel/feature/sucompat.c
+          if ! grep -R -q \
+               "strncpy_from_user_nofault" \
+               include arch/arm64/include 2>/dev/null; then
+
+            echo "Samsung 4.19 does not provide strncpy_from_user_nofault"
+            echo "Replacing KSUN calls with strncpy_from_user"
+
+            echo "=== Calls before patch ==="
+            grep -R -n \
+              "strncpy_from_user_nofault" \
+              KernelSU-Next/kernel || true
+
+            grep -R -l \
+              "strncpy_from_user_nofault" \
+              KernelSU-Next/kernel \
+              | while read -r file; do
+                  echo "Patching: $file"
+
+                  sed -i \
+                    's/strncpy_from_user_nofault/strncpy_from_user/g' \
+                    "$file"
+                done
+
+            echo "=== Calls after patch ==="
+
+            if grep -R -n \
+                 "strncpy_from_user_nofault" \
+                 KernelSU-Next/kernel; then
+              echo "ERROR: unpatched strncpy_from_user_nofault references remain"
+              exit 1
+            else
+              echo "All strncpy_from_user_nofault references converted"
+            fi
+          else
+            echo "Kernel already provides strncpy_from_user_nofault"
           fi
 
-          echo "=== Samsung 4.19 compatibility patch complete ==="
+          echo
+          echo "=== Verify patched sucompat.c ==="
+          sed -n '1,170p' \
+            KernelSU-Next/kernel/feature/sucompat.c
+
+          echo
+          echo "=== Remaining potentially unavailable nofault APIs ==="
+          grep -R -n \
+            "_nofault" \
+            KernelSU-Next/kernel \
+            2>/dev/null || true
+
+          echo
+          echo "=== Samsung 4.19 compatibility stage complete ==="
 
       - name: Configure M127F base kernel
         run: |
@@ -196,13 +243,11 @@ jobs:
 
           test -x scripts/config
 
-          echo "=== Enable KPROBES ==="
           scripts/config --enable KPROBES
-
-          echo "=== Enable KernelSU ==="
           scripts/config --enable KSU
 
-          echo "=== Resolve dependencies ==="
+          echo "=== Resolve Kconfig dependencies ==="
+
           make ARCH=arm64 \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -216,16 +261,16 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== KernelSU config ==="
+          echo "=== KernelSU ==="
           grep -iE "CONFIG_(KSU|KERNELSU)" .config || true
 
-          echo "=== SELinux config ==="
+          echo "=== SELinux ==="
           grep -i "CONFIG_SECURITY_SELINUX" .config || true
 
-          echo "=== Kprobe config ==="
+          echo "=== Kprobes ==="
           grep -i "KPROBE" .config || true
 
-          echo "=== EXT4 config ==="
+          echo "=== EXT4 ==="
           grep '^CONFIG_EXT4_FS=' .config || true
 
           echo "=== Required settings ==="
@@ -233,7 +278,7 @@ jobs:
           grep '^CONFIG_EXT4_FS=y$' .config
           grep '^CONFIG_KSU=y$' .config
 
-          echo "=== Configuration verification complete ==="
+          echo "=== Configuration valid ==="
 
       - name: Verify compiler environment
         run: |
@@ -253,7 +298,7 @@ jobs:
           which aarch64-linux-gnu-as
           aarch64-linux-gnu-as --version | head
 
-          echo "=== compiler target test ==="
+          echo "=== target test ==="
           echo | clang \
             --target=aarch64-linux-gnu \
             -dM -E - \
@@ -297,14 +342,14 @@ jobs:
               -print -quit 2>/dev/null
           )"
 
-          if [ -n "$SELINUX_HIDE_OBJECT" ]; then
-            echo "=== SUCCESS: Native SELinux Hide compiled ==="
-            echo "$SELINUX_HIDE_OBJECT"
-            ls -lh "$SELINUX_HIDE_OBJECT"
-          else
-            echo "ERROR: selinux_hide.c exists but selinux_hide.o was not built."
+          if [ -z "$SELINUX_HIDE_OBJECT" ]; then
+            echo "ERROR: selinux_hide.o was not produced"
             exit 1
           fi
+
+          echo "=== SUCCESS: native SELinux Hide compiled ==="
+          echo "$SELINUX_HIDE_OBJECT"
+          ls -lh "$SELINUX_HIDE_OBJECT"
 
       - name: Verify KernelSU objects were compiled
         run: |
@@ -313,7 +358,8 @@ jobs:
           echo "=== drivers/kernelsu ==="
           ls -la drivers/kernelsu
 
-          echo "=== KernelSU build products ==="
+          echo "=== KernelSU object files ==="
+
           find . \
             -type f \
             \( \
@@ -321,7 +367,7 @@ jobs:
               -o -name "*kernelsu*.o" \
               -o -name "selinux_hide.o" \
             \) \
-            -print 2>/dev/null | head -n 150 || true
+            -print 2>/dev/null | head -n 200 || true
 
       - name: Verify kernel image
         run: |
@@ -330,7 +376,7 @@ jobs:
           echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
 
-          echo "=== Searching for kernel images ==="
+          echo "=== Kernel images ==="
 
           find arch/arm64/boot \
             -maxdepth 2 \
@@ -344,7 +390,7 @@ jobs:
 
           test -f arch/arm64/boot/Image
 
-          echo "=== Kernel Image ==="
+          echo "=== Final Image ==="
           ls -lh arch/arm64/boot/Image
 
       - name: Prepare AnyKernel package
@@ -360,7 +406,7 @@ jobs:
           echo "=== AnyKernel contents ==="
           ls -lah output/
 
-          echo "=== Packaged kernel Image ==="
+          echo "=== Kernel ==="
           ls -lh output/Image
 
       - name: Create flashable ZIP
