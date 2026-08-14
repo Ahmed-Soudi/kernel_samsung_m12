@@ -104,34 +104,6 @@ jobs:
 
           echo "=== Native SELinux Hide source verified in v3.3.0 ==="
 
-      - name: Apply Samsung 4.19 strscpy_pad compatibility
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("KernelSU-Next/kernel/compat/kernel_compat.h")
-          s = p.read_text()
-
-          old = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 222)
-              return strscpy_pad(dest, src, count);
-          #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
-
-          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
-              return strscpy_pad(dest, src, count);
-          #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
-
-          if old in s:
-              p.write_text(s.replace(old, new, 1))
-              print("Applied Samsung 4.19 strscpy_pad fallback patch")
-          else:
-              print("Exact old block not present in v3.3.0; no patch applied")
-          PY
-
-          echo "=== strscpy compatibility code ==="
-          grep -n -A15 -B3 \
-            "static inline ssize_t __strscpy_pad" \
-            KernelSU-Next/kernel/compat/kernel_compat.h || true
-
       - name: Configure M127F kernel
         run: |
           export PATH="$HOME/toolchain/bin:$PATH"
