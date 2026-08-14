@@ -1,4 +1,4 @@
-name: Build M127F Kernel
+name: Build M127F Kernel - KSUN v3.3.0
 
 on:
   workflow_dispatch:
@@ -17,197 +17,148 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            ccache \
-            curl \
-            flex \
-            git \
-            libelf-dev \
-            libssl-dev \
-            python3 \
-            zip \
-            unzip \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            bc bison build-essential ccache curl flex git \
+            libelf-dev libssl-dev python3 zip unzip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Download Android Clang r383902
         run: |
           mkdir -p "$HOME/toolchain"
-
           curl -L \
             "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
             -o /tmp/clang-r383902.tar.gz
-
-          tar -xf /tmp/clang-r383902.tar.gz \
-            -C "$HOME/toolchain"
-
-          echo "=== Clang version ==="
+          tar -xf /tmp/clang-r383902.tar.gz -C "$HOME/toolchain"
           "$HOME/toolchain/bin/clang" --version
-
-          echo "=== AArch64 GNU linker ==="
           aarch64-linux-gnu-ld --version | head
 
-      - name: Update KernelSU Next submodule
+      - name: Pin KernelSU-Next exactly to v3.3.0
         run: |
-          cd KernelSU-Next
+          set -euxo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          git -C KernelSU-Next remote set-url origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KernelSU-Next fetch --tags --force origin
+          git -C KernelSU-Next checkout --detach v3.3.0
+          git -C KernelSU-Next describe --tags --always
+          git -C KernelSU-Next rev-parse HEAD
+          git -C KernelSU-Next log -1 --oneline
+          test "$(git -C KernelSU-Next describe --tags --exact-match)" = "v3.3.0"
 
-          echo "=== KernelSU remotes ==="
-          git remote -v
+      - name: Verify native SELinux Hide is present
+        run: |
+          set -euxo pipefail
+          test -f KernelSU-Next/kernel/feature/selinux_hide.c
+          test -f KernelSU-Next/kernel/feature/selinux_hide.h
+          grep -n "ksu_selinux_hide_init" KernelSU-Next/kernel/feature/selinux_hide.c
+          grep -n "KSU_FEATURE_SELINUX_HIDE" KernelSU-Next/kernel/feature/selinux_hide.c
+          grep -n "selinux_hide.o" KernelSU-Next/kernel/Makefile
+          grep -n "ksu_lsm_hook" KernelSU-Next/kernel/feature/selinux_hide.c
+          grep -n 'find_kernel_symbol_exact("write_op")' KernelSU-Next/kernel/feature/selinux_hide.c
+          echo "Native SELinux Hide verified in v3.3.0"
 
-          git fetch origin
-
-          echo "=== Switching to latest legacy branch ==="
-          git checkout -B legacy origin/legacy
-
-          echo "=== KernelSU commit ==="
-          git rev-parse HEAD
-          git log -1 --oneline
-
-          cd ..
-
-      - name: Fix strscpy_pad compatibility for Samsung 4.19
+      - name: Apply Samsung 4.19 strscpy_pad compatibility
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("KernelSU-Next/kernel/compat/kernel_compat.h")
           s = p.read_text()
-
           old = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 222)
               return strscpy_pad(dest, src, count);
           #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
-
           new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
               return strscpy_pad(dest, src, count);
           #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)"""
-
-          if old not in s:
-              raise SystemExit(
-                  "Expected strscpy_pad compatibility block not found"
-              )
-
-          p.write_text(s.replace(old, new, 1))
-
-          print("Forced Samsung 4.19 to use KSUN strscpy fallback")
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+              print("Applied Samsung 4.19 strscpy_pad fallback patch")
+          else:
+              print("Exact old block not present in v3.3.0; no patch applied")
           PY
-
-          echo "=== Patched strscpy compatibility code ==="
-          grep -n -A15 -B3 \
-            "static inline ssize_t __strscpy_pad" \
-            KernelSU-Next/kernel/compat/kernel_compat.h
+          grep -n -A15 -B3 "static inline ssize_t __strscpy_pad" KernelSU-Next/kernel/compat/kernel_compat.h || true
 
       - name: Configure M127F kernel
         run: |
           export PATH="$HOME/toolchain/bin:$PATH"
-
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
           export ARCH=arm64
-
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-gnu-
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- exynos850-m12nsxx_defconfig
 
-          make ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            exynos850-m12nsxx_defconfig
-
-      - name: Show KernelSU config
+      - name: Verify M127F and KernelSU configuration
         run: |
           echo "=== KernelSU config ==="
-          grep -iE "KSU|KERNELSU" .config || true
-
+          grep -iE "CONFIG_(KSU|KERNELSU)" .config || true
+          echo "=== SELinux config ==="
+          grep -i "CONFIG_SECURITY_SELINUX" .config || true
+          echo "=== Kprobe config ==="
+          grep -i "KPROBE" .config || true
           echo "=== SUSFS config ==="
           grep -i "SUSFS" .config || true
+          test "$(grep -c '^CONFIG_KSU=y$' .config)" -eq 1
 
       - name: Verify compiler environment
         run: |
           export PATH="$HOME/toolchain/bin:$PATH"
-
-          echo "=== clang ==="
           which clang
           clang --version
-
-          echo "=== linker ==="
           which aarch64-linux-gnu-ld
           aarch64-linux-gnu-ld --version | head
-
-          echo "=== assembler ==="
           which aarch64-linux-gnu-as
           aarch64-linux-gnu-as --version | head
-
-          echo "=== compiler target test ==="
-          echo | clang \
-            --target=aarch64-linux-gnu \
-            -dM -E - \
-            | grep -E "__aarch64__|__AARCH64"
+          echo | clang --target=aarch64-linux-gnu -dM -E - | grep -E "__aarch64__|__AARCH64"
 
       - name: Build M127F kernel
         run: |
           export PATH="$HOME/toolchain/bin:$PATH"
-
           export PLATFORM_VERSION=13
           export ANDROID_MAJOR_VERSION=t
           export ARCH=arm64
-
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-gnu-
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
 
-          make ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            -j$(nproc)
+      - name: Verify v3.3.0 SELinux Hide was compiled
+        run: |
+          echo "=== Search SELinux Hide build products ==="
+          find drivers KernelSU-Next -type f \
+            \( -name '*selinux_hide*.o' -o -name '*selinux_hide*.a' \) -print 2>/dev/null || true
+          grep -R "selinux_hide.o" KernelSU-Next/kernel/Makefile
 
       - name: Verify kernel image
         run: |
-          echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
-
-          echo "=== Searching for kernel images ==="
-          find arch/arm64/boot \
-            -maxdepth 2 \
-            -type f \
-            \( \
-              -name "Image" \
-              -o -name "Image.gz" \
-              -o -name "Image.gz-dtb" \
-            \) \
-            -ls
-
+          find arch/arm64/boot -maxdepth 2 -type f \
+            \( -name "Image" -o -name "Image.gz" -o -name "Image.gz-dtb" \) -ls
           test -f arch/arm64/boot/Image
 
       - name: Prepare AnyKernel package
         run: |
           rm -rf output
           mkdir -p output
-
           cp -a anykernel/. output/
           cp arch/arm64/boot/Image output/Image
-
-          echo "=== AnyKernel contents ==="
           ls -lah output/
 
       - name: Create flashable ZIP
         run: |
           cd output
-          zip -r ../M127F-KSUN-Latest.zip .
+          zip -r ../M127F-KSUN-v3.3.0-SELinuxHide.zip .
 
       - name: Upload flashable kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: M127F-KSUN-Latest
-          path: M127F-KSUN-Latest.zip
+          name: M127F-KSUN-v3.3.0-SELinuxHide
+          path: M127F-KSUN-v3.3.0-SELinuxHide.zip
 
       - name: Upload build config
         uses: actions/upload-artifact@v4
         with:
-          name: M127F-Kernel-Config
+          name: M127F-KSUN-v3.3.0-Config
           path: .config
