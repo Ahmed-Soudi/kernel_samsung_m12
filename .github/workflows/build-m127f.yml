@@ -123,6 +123,38 @@ jobs:
 
           echo "=== Native SELinux Hide verified in v3.3.0 ==="
 
+      - name: Apply Samsung 4.19 KSUN compatibility fixes
+        run: |
+          set -euxo pipefail
+
+          echo "=== Target kernel header compatibility ==="
+
+          if [ ! -f include/linux/pgtable.h ]; then
+            echo "Samsung 4.19 has no include/linux/pgtable.h"
+
+            if grep -q '^#include <linux/pgtable.h>$' \
+                 KernelSU-Next/kernel/feature/sucompat.c; then
+
+              sed -i \
+                '/^#include <linux\/pgtable\.h>$/d' \
+                KernelSU-Next/kernel/feature/sucompat.c
+
+              echo "Removed unused linux/pgtable.h include from sucompat.c"
+            fi
+          else
+            echo "linux/pgtable.h exists; no compatibility patch required"
+          fi
+
+          echo "=== Verify sucompat includes after patch ==="
+          head -n 30 KernelSU-Next/kernel/feature/sucompat.c
+
+          if [ ! -f include/linux/pgtable.h ]; then
+            ! grep -q '^#include <linux/pgtable.h>$' \
+              KernelSU-Next/kernel/feature/sucompat.c
+          fi
+
+          echo "=== Samsung 4.19 compatibility patch complete ==="
+
       - name: Configure M127F base kernel
         run: |
           set -euxo pipefail
@@ -358,6 +390,7 @@ jobs:
         with:
           name: M127F-KSUN-v3.3.0-Config
           path: .config
+          include-hidden-files: true
 
       - name: Upload build diagnostics
         if: always()
@@ -367,4 +400,6 @@ jobs:
           path: |
             .config
             KernelSU-Next/kernel/feature/selinux_hide.c
+            KernelSU-Next/kernel/feature/sucompat.c
           if-no-files-found: ignore
+          include-hidden-files: true
