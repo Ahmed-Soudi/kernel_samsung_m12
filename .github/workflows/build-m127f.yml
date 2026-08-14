@@ -51,26 +51,48 @@ jobs:
           echo "=== AArch64 GNU linker ==="
           aarch64-linux-gnu-ld --version | head
 
-      - name: Pin KernelSU-Next exactly to v3.3.0
+      - name: Integrate KernelSU-Next v3.3.0
         run: |
           set -euxo pipefail
 
+          echo "=== Initialize KernelSU-Next submodule ==="
           git submodule sync --recursive
           git submodule update --init --recursive
 
+          echo "=== Set official KernelSU-Next remote ==="
           git -C KernelSU-Next remote set-url origin \
             https://github.com/KernelSU-Next/KernelSU-Next.git
 
           git -C KernelSU-Next fetch --tags --force origin
 
-          git -C KernelSU-Next checkout --detach v3.3.0
+          echo "=== Remove stale drivers/kernelsu link if present ==="
+          rm -rf drivers/kernelsu
 
-          echo "=== KernelSU-Next revision ==="
-          git -C KernelSU-Next describe --tags --always
+          echo "=== Run official KSUN v3.3.0 setup ==="
+          sh KernelSU-Next/kernel/setup.sh v3.3.0
+
+          echo "=== Verify exact KernelSU-Next version ==="
+          git -C KernelSU-Next describe --tags --exact-match
           git -C KernelSU-Next rev-parse HEAD
           git -C KernelSU-Next log -1 --oneline
 
           test "$(git -C KernelSU-Next describe --tags --exact-match)" = "v3.3.0"
+
+          echo "=== Verify drivers/kernelsu integration ==="
+          ls -ld drivers/kernelsu
+          readlink -f drivers/kernelsu
+
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+          echo "=== Verify Makefile integration ==="
+          grep -n "kernelsu" drivers/Makefile
+
+          echo "=== Verify Kconfig integration ==="
+          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
+
+          echo "=== KernelSU-Next v3.3.0 integrated successfully ==="
 
       - name: Verify native SELinux Hide is present
         run: |
@@ -87,25 +109,25 @@ jobs:
           grep -n "KSU_FEATURE_SELINUX_HIDE" \
             KernelSU-Next/kernel/feature/selinux_hide.c
 
-          echo "=== Find SELinux Hide build integration ==="
-          grep -R -n "selinux_hide" \
-            KernelSU-Next/kernel/Makefile \
-            KernelSU-Next/kernel/Kbuild \
-            KernelSU-Next/kernel/feature \
-            2>/dev/null || true
-
-          echo "=== LSM hook implementation ==="
+          echo "=== SELinux Hide LSM integration ==="
           grep -n "ksu_lsm_hook" \
             KernelSU-Next/kernel/feature/selinux_hide.c || true
 
-          echo "=== write_op symbol lookup ==="
+          echo "=== SELinux write_op integration ==="
           grep -n 'find_kernel_symbol_exact("write_op")' \
             KernelSU-Next/kernel/feature/selinux_hide.c || true
+
+          echo "=== SELinux Hide source references ==="
+          grep -R -n "selinux_hide" \
+            KernelSU-Next/kernel \
+            2>/dev/null | head -n 100 || true
 
           echo "=== Native SELinux Hide source verified in v3.3.0 ==="
 
       - name: Configure M127F kernel
         run: |
+          set -euxo pipefail
+
           export PATH="$HOME/toolchain/bin:$PATH"
 
           export PLATFORM_VERSION=13
@@ -124,6 +146,8 @@ jobs:
 
       - name: Verify M127F and KernelSU configuration
         run: |
+          set -euxo pipefail
+
           echo "=== KernelSU config ==="
           grep -iE "CONFIG_(KSU|KERNELSU)" .config || true
 
@@ -137,10 +161,20 @@ jobs:
           grep -i "SUSFS" .config || true
 
           echo "=== Required KernelSU setting ==="
-          test "$(grep -c '^CONFIG_KSU=y$' .config)" -eq 1
+          grep '^CONFIG_KSU=y$' .config
+
+          echo "=== Manual hook setting ==="
+          grep '^CONFIG_KSU_MANUAL_HOOK=y$' .config || true
+
+          echo "=== KPM setting ==="
+          grep '^CONFIG_KPM=y$' .config || true
+
+          echo "=== Configuration verification complete ==="
 
       - name: Verify compiler environment
         run: |
+          set -euxo pipefail
+
           export PATH="$HOME/toolchain/bin:$PATH"
 
           echo "=== clang ==="
@@ -163,6 +197,8 @@ jobs:
 
       - name: Build M127F kernel
         run: |
+          set -euxo pipefail
+
           export PATH="$HOME/toolchain/bin:$PATH"
 
           export PLATFORM_VERSION=13
@@ -181,38 +217,62 @@ jobs:
 
       - name: Verify v3.3.0 SELinux Hide was compiled
         run: |
-          echo "=== Search SELinux Hide build products ==="
+          set -euxo pipefail
 
-          find drivers KernelSU-Next \
+          echo "=== Search SELinux Hide object ==="
+
+          find . \
             -type f \
-            \( \
-              -name "*selinux_hide*.o" \
-              -o -name "*selinux_hide*.a" \
-            \) \
+            -name "*selinux_hide*.o" \
             -print 2>/dev/null || true
 
-          if find drivers KernelSU-Next \
-               -type f \
-               -name "*selinux_hide*.o" \
-               -print -quit 2>/dev/null | grep -q .; then
-            echo "Native SELinux Hide object compiled successfully"
-          else
-            echo "No standalone selinux_hide.o found."
-            echo "Checking source/build integration instead:"
+          SELINUX_HIDE_OBJECT="$(
+            find . \
+              -type f \
+              -name "*selinux_hide*.o" \
+              -print -quit 2>/dev/null
+          )"
 
-            grep -R -n "selinux_hide" \
-              KernelSU-Next/kernel/Makefile \
-              KernelSU-Next/kernel/Kbuild \
-              KernelSU-Next/kernel/feature \
-              2>/dev/null || true
+          if [ -n "$SELINUX_HIDE_OBJECT" ]; then
+            echo "=== SUCCESS: Native SELinux Hide compiled ==="
+            echo "$SELINUX_HIDE_OBJECT"
+            ls -lh "$SELINUX_HIDE_OBJECT"
+          else
+            echo "ERROR: Native SELinux Hide source exists but no compiled object was found."
+            echo "KernelSU may not actually have been linked into this build."
+            exit 1
           fi
+
+      - name: Verify KernelSU objects were compiled
+        run: |
+          set -euxo pipefail
+
+          echo "=== KernelSU build products ==="
+
+          find . \
+            -type f \
+            \( \
+              -name "kernelsu.o" \
+              -o -name "built-in.a" \
+              -o -name "*ksu*.o" \
+            \) \
+            2>/dev/null | grep -E "KernelSU|kernelsu" | head -n 100 || true
+
+          echo "=== drivers/kernelsu ==="
+          ls -la drivers/kernelsu
+
+          echo "=== KernelSU feature directory ==="
+          ls -la drivers/kernelsu/feature || true
 
       - name: Verify kernel image
         run: |
+          set -euxo pipefail
+
           echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
 
           echo "=== Searching for kernel images ==="
+
           find arch/arm64/boot \
             -maxdepth 2 \
             -type f \
@@ -225,8 +285,13 @@ jobs:
 
           test -f arch/arm64/boot/Image
 
+          echo "=== Kernel Image ==="
+          ls -lh arch/arm64/boot/Image
+
       - name: Prepare AnyKernel package
         run: |
+          set -euxo pipefail
+
           rm -rf output
           mkdir -p output
 
@@ -236,19 +301,43 @@ jobs:
           echo "=== AnyKernel contents ==="
           ls -lah output/
 
+          echo "=== Packaged kernel Image ==="
+          ls -lh output/Image
+
       - name: Create flashable ZIP
         run: |
+          set -euxo pipefail
+
           cd output
-          zip -r ../M127F-KSUN-v3.3.0-SELinuxHide.zip .
+
+          zip -r9 \
+            ../M127F-KSUN-v3.3.0-SELinuxHide.zip \
+            .
+
+          cd ..
+
+          echo "=== Flashable ZIP ==="
+          ls -lh M127F-KSUN-v3.3.0-SELinuxHide.zip
 
       - name: Upload flashable kernel ZIP
         uses: actions/upload-artifact@v4
         with:
           name: M127F-KSUN-v3.3.0-SELinuxHide
           path: M127F-KSUN-v3.3.0-SELinuxHide.zip
+          compression-level: 0
 
       - name: Upload build config
         uses: actions/upload-artifact@v4
         with:
           name: M127F-KSUN-v3.3.0-Config
           path: .config
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: M127F-KSUN-v3.3.0-Diagnostics
+          path: |
+            .config
+            KernelSU-Next/kernel/feature/selinux_hide.c
+          if-no-files-found: ignore
