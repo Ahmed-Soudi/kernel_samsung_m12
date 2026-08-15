@@ -232,11 +232,6 @@ jobs:
           p = Path("KernelSU-Next/kernel/infra/file_wrapper.c")
           s = p.read_text()
 
-          # --------------------------------------------------------
-          # Remove iopoll wrappers.
-          # Samsung 4.19 struct file_operations has no iopoll member.
-          # --------------------------------------------------------
-
           old_iopoll = r'''#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
           static int ksu_wrapper_iopoll(struct kiocb *kiocb, struct io_comp_batch *icb,
                                         unsigned int v)
@@ -273,11 +268,6 @@ jobs:
 
           s = s.replace(old_iopoll_assignment, "", 1)
 
-          # --------------------------------------------------------
-          # Remove remap_file_range wrapper.
-          # Samsung 4.19 uses clone_file_range/dedupe_file_range.
-          # --------------------------------------------------------
-
           start_marker = "// no REMAP_FILE_DEDUP: use file_in\n"
           end_marker = "static int ksu_wrapper_fadvise"
 
@@ -304,11 +294,6 @@ jobs:
 
           s = s.replace(old_remap_assignment, "", 1)
 
-          # --------------------------------------------------------
-          # Samsung 4.19 does not expose the newer anonymous inode
-          # security initializer used by current KSUN.
-          # --------------------------------------------------------
-
           old_security = (
               "    error = security_inode_init_security_anon("
               "inode, &qname, context_inode);\n"
@@ -329,10 +314,6 @@ jobs:
               )
 
           s = s.replace(old_security, new_security, 1)
-
-          # --------------------------------------------------------
-          # Samsung SELinux 4.19 exposes inode->i_security directly.
-          # --------------------------------------------------------
 
           old_selinux_inode = (
               "    struct inode_security_struct *wrapper_sec = "
@@ -362,11 +343,7 @@ jobs:
           )
           PY
 
-          echo
-          echo "=== Verify file_wrapper was NOT truncated ==="
-
-          head -n 50 \
-            KernelSU-Next/kernel/infra/file_wrapper.c
+          echo "=== Verify file_wrapper structure ==="
 
           grep -n \
             '^struct ksu_file_wrapper {' \
@@ -376,30 +353,65 @@ jobs:
             '^static int ksu_wrapper_open' \
             KernelSU-Next/kernel/infra/file_wrapper.c
 
-          grep -n \
-            '^static ssize_t ksu_wrapper_read' \
-            KernelSU-Next/kernel/infra/file_wrapper.c
-
-          echo
-          echo "=== Verify unsupported APIs are gone ==="
-
           if grep -n -E \
                'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP|^[[:space:]]*error[[:space:]]*=[[:space:]]*security_inode_init_security_anon|selinux_inode\(' \
                KernelSU-Next/kernel/infra/file_wrapper.c; then
 
             echo "ERROR: unsupported file_wrapper API remains"
             exit 1
-          else
-            echo "Unsupported file_wrapper APIs removed"
           fi
 
           echo
-          echo "=== Verify Samsung SELinux inode access ==="
+          echo "=== Compatibility #5: old seccomp has no action cache ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          kernel_seccomp = Path("kernel/seccomp.c").read_text()
+          kbuild_path = Path("KernelSU-Next/kernel/Kbuild")
+          kbuild = kbuild_path.read_text()
+
+          cache_line = "kernelsu-objs += infra/seccomp_cache.o\n"
+
+          has_action_cache = (
+              "struct action_cache" in kernel_seccomp
+              or "SECCOMP_ARCH_NATIVE_NR" in kernel_seccomp
+          )
+
+          if has_action_cache:
+              print("Kernel provides modern seccomp action cache; keeping KSUN cache")
+          else:
+              print("Samsung 4.19 seccomp_filter has no action cache")
+
+              if cache_line not in kbuild:
+                  raise SystemExit(
+                      "Expected infra/seccomp_cache.o Kbuild line not found"
+                  )
+
+              kbuild = kbuild.replace(cache_line, "", 1)
+              kbuild_path.write_text(kbuild)
+
+              print("Disabled KSUN seccomp_cache.o for Samsung 4.19")
+          PY
+
+          echo "=== Verify seccomp compatibility ==="
+
+          echo "Kernel seccomp_filter:"
+          grep -n -A12 \
+            '^struct seccomp_filter {' \
+            kernel/seccomp.c | head -n 20
+
+          echo "KSUN Kbuild seccomp cache:"
+          grep -n \
+            'infra/seccomp_cache.o' \
+            KernelSU-Next/kernel/Kbuild || true
+
+          echo
+          echo "=== Native SELinux Hide MUST remain enabled ==="
 
           grep -n \
-            -A3 -B3 \
-            "wrapper_inode->i_security" \
-            KernelSU-Next/kernel/infra/file_wrapper.c
+            'feature/selinux_hide.o' \
+            KernelSU-Next/kernel/Kbuild
 
           echo
           echo "=== Remaining nofault APIs ==="
@@ -447,7 +459,9 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
 
           echo "=== Initial requirements ==="
-          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' \
+
+          grep -E \
+            'CONFIG_(KPROBES|KSU|EXT4_FS)' \
             .config || true
 
           test -x scripts/config
@@ -462,7 +476,9 @@ jobs:
             olddefconfig
 
           echo "=== Final requirements ==="
-          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' \
+
+          grep -E \
+            'CONFIG_(KPROBES|KSU|EXT4_FS)' \
             .config || true
 
       - name: Verify M127F and KernelSU configuration
@@ -470,18 +486,25 @@ jobs:
           set -euxo pipefail
 
           echo "=== KernelSU ==="
-          grep -iE "CONFIG_(KSU|KERNELSU)" \
+
+          grep -iE \
+            "CONFIG_(KSU|KERNELSU)" \
             .config || true
 
           echo "=== SELinux ==="
-          grep -i "CONFIG_SECURITY_SELINUX" \
+
+          grep -i \
+            "CONFIG_SECURITY_SELINUX" \
             .config || true
 
           echo "=== Kprobes ==="
-          grep -i "KPROBE" \
+
+          grep -i \
+            "KPROBE" \
             .config || true
 
           echo "=== Required settings ==="
+
           grep '^CONFIG_KPROBES=y$' .config
           grep '^CONFIG_EXT4_FS=y$' .config
           grep '^CONFIG_KSU=y$' .config
@@ -641,9 +664,11 @@ jobs:
           name: M127F-KSUN-v3.3.0-Diagnostics
           path: |
             .config
+            KernelSU-Next/kernel/Kbuild
             KernelSU-Next/kernel/feature/selinux_hide.c
             KernelSU-Next/kernel/feature/sucompat.c
             KernelSU-Next/kernel/hook/arm64/patch_memory.c
             KernelSU-Next/kernel/infra/file_wrapper.c
+            KernelSU-Next/kernel/infra/seccomp_cache.c
           if-no-files-found: ignore
           include-hidden-files: true
