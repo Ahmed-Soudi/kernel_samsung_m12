@@ -55,17 +55,14 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== Initialize KernelSU-Next submodule ==="
           git submodule sync --recursive
           git submodule update --init --recursive
 
-          echo "=== Set official KernelSU-Next remote ==="
           git -C KernelSU-Next remote set-url origin \
             https://github.com/KernelSU-Next/KernelSU-Next.git
 
           git -C KernelSU-Next fetch --tags --force origin
 
-          echo "=== Remove stale drivers/kernelsu link ==="
           rm -rf drivers/kernelsu
 
           echo "=== Run official KSUN v3.3.0 setup ==="
@@ -141,10 +138,8 @@ jobs:
                 '/^#include <linux\/pgtable\.h>$/d' \
                 KernelSU-Next/kernel/feature/sucompat.c
 
-              echo "Removed unused linux/pgtable.h include from sucompat.c"
+              echo "Removed unused linux/pgtable.h include"
             fi
-          else
-            echo "linux/pgtable.h exists; no patch required"
           fi
 
           echo
@@ -154,10 +149,8 @@ jobs:
                "strncpy_from_user_nofault" \
                include arch/arm64/include 2>/dev/null; then
 
-            echo "Samsung 4.19 does not provide strncpy_from_user_nofault"
-            echo "Replacing KSUN calls with strncpy_from_user"
+            echo "Kernel lacks strncpy_from_user_nofault"
 
-            echo "=== Calls before patch ==="
             grep -R -n \
               "strncpy_from_user_nofault" \
               KernelSU-Next/kernel || true
@@ -166,6 +159,7 @@ jobs:
               "strncpy_from_user_nofault" \
               KernelSU-Next/kernel \
               | while read -r file; do
+
                   echo "Patching: $file"
 
                   sed -i \
@@ -173,27 +167,100 @@ jobs:
                     "$file"
                 done
 
-            echo "=== Calls after patch ==="
-
             if grep -R -n \
                  "strncpy_from_user_nofault" \
                  KernelSU-Next/kernel; then
-              echo "ERROR: unpatched strncpy_from_user_nofault references remain"
+
+              echo "ERROR: unpatched references remain"
               exit 1
-            else
-              echo "All strncpy_from_user_nofault references converted"
             fi
-          else
-            echo "Kernel already provides strncpy_from_user_nofault"
           fi
 
           echo
-          echo "=== Verify patched sucompat.c ==="
-          sed -n '1,170p' \
-            KernelSU-Next/kernel/feature/sucompat.c
+          echo "=== Compatibility #3: copy_to_kernel_nofault ==="
+
+          if ! grep -R -q \
+               "copy_to_kernel_nofault" \
+               include arch/arm64/include lib 2>/dev/null; then
+
+            echo "Samsung 4.19 lacks copy_to_kernel_nofault"
+
+            echo "=== KSUN users ==="
+            grep -R -n \
+              "copy_to_kernel_nofault" \
+              KernelSU-Next/kernel || true
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          files = [
+              Path("KernelSU-Next/kernel/hook/arm64/patch_memory.c"),
+              Path("KernelSU-Next/kernel/hook/x86_64/patch_memory.c"),
+          ]
+
+          compat = r'''
+          /*
+           * Samsung Linux 4.19 compatibility:
+           *
+           * Modern kernels provide copy_to_kernel_nofault().
+           * This vendor 4.19 tree predates that helper.
+           *
+           * probe_kernel_write() provides the old-kernel equivalent
+           * fault-protected kernel-memory write operation.
+           */
+          #ifndef copy_to_kernel_nofault
+          static inline long ksu_copy_to_kernel_nofault(void *dst,
+                                                        const void *src,
+                                                        size_t size)
+          {
+              return probe_kernel_write(dst, src, size);
+          }
+          #define copy_to_kernel_nofault ksu_copy_to_kernel_nofault
+          #endif
+
+          '''
+
+          for p in files:
+              if not p.exists():
+                  continue
+
+              s = p.read_text()
+
+              if "ksu_copy_to_kernel_nofault" in s:
+                  print(f"{p}: compatibility helper already present")
+                  continue
+
+              marker = "#include"
+
+              lines = s.splitlines(keepends=True)
+              last_include = -1
+
+              for i, line in enumerate(lines):
+                  if line.startswith("#include"):
+                      last_include = i
+
+              if last_include < 0:
+                  raise SystemExit(f"No include block found in {p}")
+
+              lines.insert(last_include + 1, "\n" + compat)
+
+              p.write_text("".join(lines))
+
+              print(f"{p}: added Samsung 4.19 copy_to_kernel_nofault compatibility")
+          PY
+
+            echo "=== Verify compatibility helper ==="
+
+            grep -R -n \
+              "ksu_copy_to_kernel_nofault" \
+              KernelSU-Next/kernel/hook || true
+          else
+            echo "Kernel already provides copy_to_kernel_nofault"
+          fi
 
           echo
-          echo "=== Remaining potentially unavailable nofault APIs ==="
+          echo "=== Remaining nofault APIs used by KSUN ==="
+
           grep -R -n \
             "_nofault" \
             KernelSU-Next/kernel \
@@ -222,8 +289,6 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             exynos850-m12nsxx_defconfig
 
-          echo "=== Base config generated ==="
-
       - name: Enable KSUN v3.3.0 requirements
         run: |
           set -euxo pipefail
@@ -238,7 +303,7 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "=== Before enabling KSUN requirements ==="
+          echo "=== Initial requirements ==="
           grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
 
           test -x scripts/config
@@ -246,15 +311,13 @@ jobs:
           scripts/config --enable KPROBES
           scripts/config --enable KSU
 
-          echo "=== Resolve Kconfig dependencies ==="
-
           make ARCH=arm64 \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             olddefconfig
 
-          echo "=== After enabling KSUN requirements ==="
+          echo "=== Final requirements ==="
           grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
 
       - name: Verify M127F and KernelSU configuration
@@ -270,15 +333,10 @@ jobs:
           echo "=== Kprobes ==="
           grep -i "KPROBE" .config || true
 
-          echo "=== EXT4 ==="
-          grep '^CONFIG_EXT4_FS=' .config || true
-
           echo "=== Required settings ==="
           grep '^CONFIG_KPROBES=y$' .config
           grep '^CONFIG_EXT4_FS=y$' .config
           grep '^CONFIG_KSU=y$' .config
-
-          echo "=== Configuration valid ==="
 
       - name: Verify compiler environment
         run: |
@@ -286,19 +344,15 @@ jobs:
 
           export PATH="$HOME/toolchain/bin:$PATH"
 
-          echo "=== clang ==="
           which clang
           clang --version
 
-          echo "=== linker ==="
           which aarch64-linux-gnu-ld
           aarch64-linux-gnu-ld --version | head
 
-          echo "=== assembler ==="
           which aarch64-linux-gnu-as
           aarch64-linux-gnu-as --version | head
 
-          echo "=== target test ==="
           echo | clang \
             --target=aarch64-linux-gnu \
             -dM -E - \
@@ -328,7 +382,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== Search SELinux Hide object ==="
+          echo "=== SELinux Hide objects ==="
 
           find . \
             -type f \
@@ -347,7 +401,7 @@ jobs:
             exit 1
           fi
 
-          echo "=== SUCCESS: native SELinux Hide compiled ==="
+          echo "=== SUCCESS: Native SELinux Hide compiled ==="
           echo "$SELINUX_HIDE_OBJECT"
           ls -lh "$SELINUX_HIDE_OBJECT"
 
@@ -355,10 +409,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== drivers/kernelsu ==="
+          echo "=== KernelSU directory ==="
           ls -la drivers/kernelsu
 
-          echo "=== KernelSU object files ==="
+          echo "=== KernelSU objects ==="
 
           find . \
             -type f \
@@ -375,8 +429,6 @@ jobs:
 
           echo "=== arch/arm64/boot ==="
           ls -lah arch/arm64/boot/
-
-          echo "=== Kernel images ==="
 
           find arch/arm64/boot \
             -maxdepth 2 \
@@ -403,11 +455,8 @@ jobs:
           cp -a anykernel/. output/
           cp arch/arm64/boot/Image output/Image
 
-          echo "=== AnyKernel contents ==="
+          echo "=== AnyKernel ==="
           ls -lah output/
-
-          echo "=== Kernel ==="
-          ls -lh output/Image
 
       - name: Create flashable ZIP
         run: |
@@ -421,7 +470,6 @@ jobs:
 
           cd ..
 
-          echo "=== Flashable ZIP ==="
           ls -lh M127F-KSUN-v3.3.0-SELinuxHide.zip
 
       - name: Upload flashable kernel ZIP
@@ -447,5 +495,6 @@ jobs:
             .config
             KernelSU-Next/kernel/feature/selinux_hide.c
             KernelSU-Next/kernel/feature/sucompat.c
+            KernelSU-Next/kernel/hook/arm64/patch_memory.c
           if-no-files-found: ignore
           include-hidden-files: true
