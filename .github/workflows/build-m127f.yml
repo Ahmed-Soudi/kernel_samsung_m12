@@ -181,15 +181,14 @@ jobs:
           from pathlib import Path
 
           p = Path("KernelSU-Next/kernel/hook/arm64/patch_memory.c")
-
           s = p.read_text()
 
           if "ksu_copy_to_kernel_nofault" not in s:
               compat = r'''
           /*
            * Samsung Linux 4.19 compatibility.
-           * probe_kernel_write() is the legacy fault-protected
-           * kernel-memory write helper.
+           * probe_kernel_write() provides the legacy protected
+           * kernel-memory write operation.
            */
           #ifndef copy_to_kernel_nofault
           static inline long ksu_copy_to_kernel_nofault(void *dst,
@@ -276,23 +275,19 @@ jobs:
 
           # --------------------------------------------------------
           # Remove remap_file_range wrapper.
-          # Samsung 4.19 has clone_file_range/dedupe_file_range
-          # instead of the newer remap_file_range member.
+          # Samsung 4.19 uses clone_file_range/dedupe_file_range.
           # --------------------------------------------------------
 
-          start_marker = (
-              "// no REMAP_FILE_DEDUP: use file_in\n"
-          )
-
-          end_marker = (
-              "static int ksu_wrapper_fadvise"
-          )
+          start_marker = "// no REMAP_FILE_DEDUP: use file_in\n"
+          end_marker = "static int ksu_wrapper_fadvise"
 
           start = s.find(start_marker)
           end = s.find(end_marker)
 
           if start < 0 or end < 0 or end <= start:
-              raise SystemExit("Could not locate remap_file_range block safely")
+              raise SystemExit(
+                  "Could not locate remap_file_range block safely"
+              )
 
           s = s[:start] + s[end:]
 
@@ -303,14 +298,15 @@ jobs:
           )
 
           if old_remap_assignment not in s:
-              raise SystemExit("Exact remap_file_range assignment not found")
+              raise SystemExit(
+                  "Exact remap_file_range assignment not found"
+              )
 
           s = s.replace(old_remap_assignment, "", 1)
 
           # --------------------------------------------------------
-          # security_inode_init_security_anon() is newer than this
-          # Samsung kernel. alloc_anon_inode() still allocates the
-          # inode security blob; KSUN later sets the SID explicitly.
+          # Samsung 4.19 does not expose the newer anonymous inode
+          # security initializer used by current KSUN.
           # --------------------------------------------------------
 
           old_security = (
@@ -323,13 +319,13 @@ jobs:
           )
 
           new_security = (
-              "    /* Samsung 4.19: no security_inode_init_security_anon(). */\n"
+              "    /* Samsung 4.19 legacy anonymous inode path. */\n"
               "    error = 0;\n"
           )
 
           if old_security not in s:
               raise SystemExit(
-                  "Exact security_inode_init_security_anon block not found"
+                  "Exact anonymous inode security block not found"
               )
 
           s = s.replace(old_security, new_security, 1)
@@ -352,17 +348,25 @@ jobs:
           if old_selinux_inode not in s:
               raise SystemExit("Exact selinux_inode line not found")
 
-          s = s.replace(old_selinux_inode, new_selinux_inode, 1)
+          s = s.replace(
+              old_selinux_inode,
+              new_selinux_inode,
+              1,
+          )
 
           p.write_text(s)
 
-          print("Samsung 4.19 file_wrapper compatibility applied safely")
+          print(
+              "Samsung 4.19 file_wrapper compatibility "
+              "applied safely"
+          )
           PY
 
           echo
           echo "=== Verify file_wrapper was NOT truncated ==="
 
-          head -n 50 KernelSU-Next/kernel/infra/file_wrapper.c
+          head -n 50 \
+            KernelSU-Next/kernel/infra/file_wrapper.c
 
           grep -n \
             '^struct ksu_file_wrapper {' \
@@ -380,11 +384,13 @@ jobs:
           echo "=== Verify unsupported APIs are gone ==="
 
           if grep -n -E \
-               'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP|security_inode_init_security_anon|selinux_inode\(' \
+               'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP|^[[:space:]]*error[[:space:]]*=[[:space:]]*security_inode_init_security_anon|selinux_inode\(' \
                KernelSU-Next/kernel/infra/file_wrapper.c; then
 
             echo "ERROR: unsupported file_wrapper API remains"
             exit 1
+          else
+            echo "Unsupported file_wrapper APIs removed"
           fi
 
           echo
@@ -441,7 +447,8 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
 
           echo "=== Initial requirements ==="
-          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
+          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' \
+            .config || true
 
           test -x scripts/config
 
@@ -455,20 +462,24 @@ jobs:
             olddefconfig
 
           echo "=== Final requirements ==="
-          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' .config || true
+          grep -E 'CONFIG_(KPROBES|KSU|EXT4_FS)' \
+            .config || true
 
       - name: Verify M127F and KernelSU configuration
         run: |
           set -euxo pipefail
 
           echo "=== KernelSU ==="
-          grep -iE "CONFIG_(KSU|KERNELSU)" .config || true
+          grep -iE "CONFIG_(KSU|KERNELSU)" \
+            .config || true
 
           echo "=== SELinux ==="
-          grep -i "CONFIG_SECURITY_SELINUX" .config || true
+          grep -i "CONFIG_SECURITY_SELINUX" \
+            .config || true
 
           echo "=== Kprobes ==="
-          grep -i "KPROBE" .config || true
+          grep -i "KPROBE" \
+            .config || true
 
           echo "=== Required settings ==="
           grep '^CONFIG_KPROBES=y$' .config
