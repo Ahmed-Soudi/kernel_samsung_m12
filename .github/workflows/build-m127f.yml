@@ -379,32 +379,132 @@ jobs:
           )
 
           if has_action_cache:
-              print("Kernel provides modern seccomp action cache; keeping KSUN cache")
+              print(
+                  "Kernel provides modern seccomp action cache; "
+                  "keeping KSUN cache"
+              )
           else:
-              print("Samsung 4.19 seccomp_filter has no action cache")
+              print(
+                  "Samsung 4.19 seccomp_filter has no action cache"
+              )
 
               if cache_line not in kbuild:
                   raise SystemExit(
-                      "Expected infra/seccomp_cache.o Kbuild line not found"
+                      "Expected infra/seccomp_cache.o "
+                      "Kbuild line not found"
                   )
 
               kbuild = kbuild.replace(cache_line, "", 1)
               kbuild_path.write_text(kbuild)
 
-              print("Disabled KSUN seccomp_cache.o for Samsung 4.19")
+              print(
+                  "Disabled KSUN seccomp_cache.o for Samsung 4.19"
+              )
           PY
 
           echo "=== Verify seccomp compatibility ==="
 
-          echo "Kernel seccomp_filter:"
           grep -n -A12 \
             '^struct seccomp_filter {' \
             kernel/seccomp.c | head -n 20
 
-          echo "KSUN Kbuild seccomp cache:"
           grep -n \
             'infra/seccomp_cache.o' \
             KernelSU-Next/kernel/Kbuild || true
+
+          echo
+          echo "=== Compatibility #6: legacy mount namespace API ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("KernelSU-Next/kernel/infra/su_mount_ns.c")
+          s = p.read_text()
+
+          old_include = "#include <uapi/linux/mount.h>\n"
+
+          if old_include in s:
+              s = s.replace(
+                  old_include,
+                  "#include <uapi/linux/fs.h>\n",
+                  1,
+              )
+
+              print(
+                  "Replaced missing uapi/linux/mount.h "
+                  "with legacy uapi/linux/fs.h"
+              )
+          else:
+              raise SystemExit(
+                  "Expected uapi/linux/mount.h include not found"
+              )
+
+          old_decl = (
+              "extern int path_mount(const char *dev_name, struct path *path,\n"
+              "                      const char *type_page, unsigned long flags,\n"
+              "                      void *data_page);\n"
+          )
+
+          new_decl = r'''/*
+           * Samsung Linux 4.19 predates path_mount().
+           *
+           * The only KSUN caller here uses path_mount() after unshare()
+           * to mark the newly-created root mount namespace private.
+           *
+           * There is no safe direct substitution with do_mount() here:
+           * the legacy helper takes a userspace pathname rather than the
+           * already-resolved struct path used by current KSUN.
+           *
+           * Keep the individual namespace mode buildable and fail this
+           * optional propagation-change operation cleanly. Global and
+           * inherited namespace modes are unaffected.
+           */
+          static int ksu_path_mount_compat(const char *dev_name,
+                                           struct path *path,
+                                           const char *type_page,
+                                           unsigned long flags,
+                                           void *data_page)
+          {
+              return -EOPNOTSUPP;
+          }
+
+          #define path_mount ksu_path_mount_compat
+          '''
+
+          if old_decl not in s:
+              raise SystemExit(
+                  "Expected path_mount declaration not found"
+              )
+
+          s = s.replace(
+              old_decl,
+              new_decl + "\n",
+              1,
+          )
+
+          p.write_text(s)
+
+          print(
+              "Applied Samsung 4.19 mount namespace compatibility"
+          )
+          PY
+
+          echo "=== Verify mount namespace compatibility ==="
+
+          head -n 70 \
+            KernelSU-Next/kernel/infra/su_mount_ns.c
+
+          grep -n \
+            "ksu_path_mount_compat" \
+            KernelSU-Next/kernel/infra/su_mount_ns.c
+
+          if grep -n \
+               '#include <uapi/linux/mount.h>' \
+               KernelSU-Next/kernel/infra/su_mount_ns.c; then
+
+            echo "ERROR: missing modern mount header still referenced"
+            exit 1
+          fi
 
           echo
           echo "=== Native SELinux Hide MUST remain enabled ==="
@@ -670,5 +770,6 @@ jobs:
             KernelSU-Next/kernel/hook/arm64/patch_memory.c
             KernelSU-Next/kernel/infra/file_wrapper.c
             KernelSU-Next/kernel/infra/seccomp_cache.c
+            KernelSU-Next/kernel/infra/su_mount_ns.c
           if-no-files-found: ignore
           include-hidden-files: true
