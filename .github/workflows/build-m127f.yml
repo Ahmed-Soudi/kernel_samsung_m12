@@ -129,8 +129,6 @@ jobs:
           echo "=== Compatibility #1: linux/pgtable.h ==="
 
           if [ ! -f include/linux/pgtable.h ]; then
-            echo "Samsung kernel does not provide include/linux/pgtable.h"
-
             if grep -q '^#include <linux/pgtable.h>$' \
                  KernelSU-Next/kernel/feature/sucompat.c; then
 
@@ -151,10 +149,6 @@ jobs:
 
             echo "Kernel lacks strncpy_from_user_nofault"
 
-            grep -R -n \
-              "strncpy_from_user_nofault" \
-              KernelSU-Next/kernel || true
-
             grep -R -l \
               "strncpy_from_user_nofault" \
               KernelSU-Next/kernel \
@@ -171,7 +165,7 @@ jobs:
                  "strncpy_from_user_nofault" \
                  KernelSU-Next/kernel; then
 
-              echo "ERROR: unpatched references remain"
+              echo "ERROR: unpatched strncpy_from_user_nofault remains"
               exit 1
             fi
           fi
@@ -183,30 +177,20 @@ jobs:
                "copy_to_kernel_nofault" \
                include arch/arm64/include lib 2>/dev/null; then
 
-            echo "Samsung 4.19 lacks copy_to_kernel_nofault"
-
-            echo "=== KSUN users ==="
-            grep -R -n \
-              "copy_to_kernel_nofault" \
-              KernelSU-Next/kernel || true
-
             python3 - <<'PY'
           from pathlib import Path
 
-          files = [
-              Path("KernelSU-Next/kernel/hook/arm64/patch_memory.c"),
-              Path("KernelSU-Next/kernel/hook/x86_64/patch_memory.c"),
-          ]
+          p = Path("KernelSU-Next/kernel/hook/arm64/patch_memory.c")
 
-          compat = r'''
+          if p.exists():
+              s = p.read_text()
+
+              if "ksu_copy_to_kernel_nofault" not in s:
+                  compat = r'''
           /*
-           * Samsung Linux 4.19 compatibility:
-           *
-           * Modern kernels provide copy_to_kernel_nofault().
-           * This vendor 4.19 tree predates that helper.
-           *
-           * probe_kernel_write() provides the old-kernel equivalent
-           * fault-protected kernel-memory write operation.
+           * Samsung Linux 4.19 compatibility.
+           * probe_kernel_write() is the legacy fault-protected
+           * kernel-memory write helper.
            */
           #ifndef copy_to_kernel_nofault
           static inline long ksu_copy_to_kernel_nofault(void *dst,
@@ -220,46 +204,209 @@ jobs:
 
           '''
 
-          for p in files:
-              if not p.exists():
-                  continue
+                  lines = s.splitlines(keepends=True)
+                  last_include = -1
 
-              s = p.read_text()
+                  for i, line in enumerate(lines):
+                      if line.startswith("#include"):
+                          last_include = i
 
-              if "ksu_copy_to_kernel_nofault" in s:
-                  print(f"{p}: compatibility helper already present")
-                  continue
+                  if last_include < 0:
+                      raise SystemExit("No include block found in patch_memory.c")
 
-              marker = "#include"
+                  lines.insert(last_include + 1, "\n" + compat)
+                  p.write_text("".join(lines))
 
-              lines = s.splitlines(keepends=True)
-              last_include = -1
-
-              for i, line in enumerate(lines):
-                  if line.startswith("#include"):
-                      last_include = i
-
-              if last_include < 0:
-                  raise SystemExit(f"No include block found in {p}")
-
-              lines.insert(last_include + 1, "\n" + compat)
-
-              p.write_text("".join(lines))
-
-              print(f"{p}: added Samsung 4.19 copy_to_kernel_nofault compatibility")
+                  print("Added copy_to_kernel_nofault compatibility")
           PY
 
-            echo "=== Verify compatibility helper ==="
-
-            grep -R -n \
+            grep -n \
               "ksu_copy_to_kernel_nofault" \
-              KernelSU-Next/kernel/hook || true
-          else
-            echo "Kernel already provides copy_to_kernel_nofault"
+              KernelSU-Next/kernel/hook/arm64/patch_memory.c
           fi
 
           echo
-          echo "=== Remaining nofault APIs used by KSUN ==="
+          echo "=== Compatibility #4: file_wrapper APIs ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("KernelSU-Next/kernel/infra/file_wrapper.c")
+          s = p.read_text()
+
+          original = s
+
+          # ---------------------------------------------------------
+          # Samsung 4.19 has no file_operations.iopoll.
+          # Remove both wrapper implementations and the fops assignment.
+          # ---------------------------------------------------------
+
+          s, count_iopoll_func = re.subn(
+              r'''
+          #if\ LINUX_VERSION_CODE\ >=\ KERNEL_VERSION\(6,\ 1,\ 0\)
+          .*?
+          #endif
+          \n
+          (?=static\ int\ ksu_wrapper_iterate)
+          ''',
+              '',
+              s,
+              count=1,
+              flags=re.S | re.X,
+          )
+
+          s, count_iopoll_assign = re.subn(
+              r'''
+          \s*p->ops\.iopoll\s*=\s*
+          fp->f_op->iopoll\s*\?\s*
+          ksu_wrapper_iopoll\s*:\s*NULL;
+          ''',
+              '',
+              s,
+              count=1,
+              flags=re.X,
+          )
+
+          # ---------------------------------------------------------
+          # Samsung 4.19 has clone_file_range/dedupe_file_range,
+          # not file_operations.remap_file_range.
+          #
+          # The wrapped fd does not require remap forwarding for KSUN's
+          # core/root/SELinux-hide functionality, so leave this optional
+          # operation unset on the old kernel.
+          # ---------------------------------------------------------
+
+          s, count_remap_func = re.subn(
+              r'''
+          //\ no\ REMAP_FILE_DEDUP:.*?
+          static\ loff_t\ ksu_wrapper_remap_file_range
+          \(.*?
+          \n\}
+          \n
+          ''',
+              '',
+              s,
+              count=1,
+              flags=re.S | re.X,
+          )
+
+          s, count_remap_assign = re.subn(
+              r'''
+          \s*p->ops\.remap_file_range\s*=\s*
+          \n?\s*fp->f_op->remap_file_range\s*\?\s*
+          ksu_wrapper_remap_file_range\s*:\s*NULL;
+          ''',
+              '',
+              s,
+              count=1,
+              flags=re.X,
+          )
+
+          # ---------------------------------------------------------
+          # security_inode_init_security_anon() is newer than this
+          # Samsung 4.19 security API.
+          #
+          # alloc_anon_inode() already allocates inode->i_security.
+          # We set the SELinux SID explicitly later in this function,
+          # so skip the newer anon initialization helper.
+          # ---------------------------------------------------------
+
+          old_security = (
+              "    error = security_inode_init_security_anon("
+              "inode, &qname, context_inode);\n"
+              "    if (error) {\n"
+              "        iput(inode);\n"
+              "        return ERR_PTR(error);\n"
+              "    }\n"
+          )
+
+          if old_security in s:
+              s = s.replace(
+                  old_security,
+                  "    /* Samsung 4.19: no security_inode_init_security_anon(). */\n"
+                  "    error = 0;\n",
+                  1,
+              )
+              count_security = 1
+          else:
+              count_security = 0
+
+          # ---------------------------------------------------------
+          # selinux_inode() helper is newer.
+          # Samsung 4.19 stores struct inode_security_struct directly
+          # in inode->i_security.
+          # ---------------------------------------------------------
+
+          old_selinux_inode = (
+              "    struct inode_security_struct *wrapper_sec = "
+              "selinux_inode(wrapper_inode);"
+          )
+
+          new_selinux_inode = (
+              "    struct inode_security_struct *wrapper_sec =\n"
+              "        (struct inode_security_struct *)wrapper_inode->i_security;"
+          )
+
+          if old_selinux_inode in s:
+              s = s.replace(old_selinux_inode, new_selinux_inode, 1)
+              count_selinux_inode = 1
+          else:
+              count_selinux_inode = 0
+
+          print("file_wrapper patch counts:")
+          print("  iopoll function:       ", count_iopoll_func)
+          print("  iopoll assignment:     ", count_iopoll_assign)
+          print("  remap function:        ", count_remap_func)
+          print("  remap assignment:      ", count_remap_assign)
+          print("  security anon init:    ", count_security)
+          print("  selinux_inode helper:  ", count_selinux_inode)
+
+          required = {
+              "iopoll function": count_iopoll_func,
+              "iopoll assignment": count_iopoll_assign,
+              "remap function": count_remap_func,
+              "remap assignment": count_remap_assign,
+              "security anon init": count_security,
+              "selinux_inode": count_selinux_inode,
+          }
+
+          failed = [name for name, count in required.items() if count != 1]
+
+          if failed:
+              raise SystemExit(
+                  "file_wrapper compatibility patch did not match: "
+                  + ", ".join(failed)
+              )
+
+          p.write_text(s)
+
+          print("Samsung 4.19 file_wrapper compatibility applied")
+          PY
+
+          echo
+          echo "=== Verify removed unsupported file_operations members ==="
+
+          if grep -n \
+               -E 'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP' \
+               KernelSU-Next/kernel/infra/file_wrapper.c; then
+
+            echo "ERROR: unsupported file_wrapper API remains"
+            exit 1
+          else
+            echo "iopoll/remap_file_range references removed"
+          fi
+
+          echo
+          echo "=== Verify SELinux 4.19 inode access ==="
+
+          grep -n \
+            -A3 -B3 \
+            "wrapper_inode->i_security" \
+            KernelSU-Next/kernel/infra/file_wrapper.c
+
+          echo
+          echo "=== Remaining potentially unavailable nofault APIs ==="
 
           grep -R -n \
             "_nofault" \
@@ -496,5 +643,6 @@ jobs:
             KernelSU-Next/kernel/feature/selinux_hide.c
             KernelSU-Next/kernel/feature/sucompat.c
             KernelSU-Next/kernel/hook/arm64/patch_memory.c
+            KernelSU-Next/kernel/infra/file_wrapper.c
           if-no-files-found: ignore
           include-hidden-files: true
