@@ -182,11 +182,10 @@ jobs:
 
           p = Path("KernelSU-Next/kernel/hook/arm64/patch_memory.c")
 
-          if p.exists():
-              s = p.read_text()
+          s = p.read_text()
 
-              if "ksu_copy_to_kernel_nofault" not in s:
-                  compat = r'''
+          if "ksu_copy_to_kernel_nofault" not in s:
+              compat = r'''
           /*
            * Samsung Linux 4.19 compatibility.
            * probe_kernel_write() is the legacy fault-protected
@@ -204,20 +203,20 @@ jobs:
 
           '''
 
-                  lines = s.splitlines(keepends=True)
-                  last_include = -1
+              lines = s.splitlines(keepends=True)
+              last_include = -1
 
-                  for i, line in enumerate(lines):
-                      if line.startswith("#include"):
-                          last_include = i
+              for i, line in enumerate(lines):
+                  if line.startswith("#include"):
+                      last_include = i
 
-                  if last_include < 0:
-                      raise SystemExit("No include block found in patch_memory.c")
+              if last_include < 0:
+                  raise SystemExit("No include block found in patch_memory.c")
 
-                  lines.insert(last_include + 1, "\n" + compat)
-                  p.write_text("".join(lines))
+              lines.insert(last_include + 1, "\n" + compat)
+              p.write_text("".join(lines))
 
-                  print("Added copy_to_kernel_nofault compatibility")
+              print("Added copy_to_kernel_nofault compatibility")
           PY
 
             grep -n \
@@ -226,91 +225,93 @@ jobs:
           fi
 
           echo
-          echo "=== Compatibility #4: file_wrapper APIs ==="
+          echo "=== Compatibility #4: Samsung 4.19 file_wrapper APIs ==="
 
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           p = Path("KernelSU-Next/kernel/infra/file_wrapper.c")
           s = p.read_text()
 
-          original = s
+          # --------------------------------------------------------
+          # Remove iopoll wrappers.
+          # Samsung 4.19 struct file_operations has no iopoll member.
+          # --------------------------------------------------------
 
-          # ---------------------------------------------------------
-          # Samsung 4.19 has no file_operations.iopoll.
-          # Remove both wrapper implementations and the fops assignment.
-          # ---------------------------------------------------------
-
-          s, count_iopoll_func = re.subn(
-              r'''
-          #if\ LINUX_VERSION_CODE\ >=\ KERNEL_VERSION\(6,\ 1,\ 0\)
-          .*?
+          old_iopoll = r'''#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+          static int ksu_wrapper_iopoll(struct kiocb *kiocb, struct io_comp_batch *icb,
+                                        unsigned int v)
+          {
+              struct ksu_file_wrapper *data = kiocb->ki_filp->private_data;
+              struct file *orig = data->orig;
+              kiocb->ki_filp = orig;
+              return orig->f_op->iopoll(kiocb, icb, v);
+          }
+          #else
+          static int ksu_wrapper_iopoll(struct kiocb *kiocb, bool spin)
+          {
+              struct ksu_file_wrapper *data = kiocb->ki_filp->private_data;
+              struct file *orig = data->orig;
+              kiocb->ki_filp = orig;
+              return orig->f_op->iopoll(kiocb, spin);
+          }
           #endif
-          \n
-          (?=static\ int\ ksu_wrapper_iterate)
-          ''',
-              '',
-              s,
-              count=1,
-              flags=re.S | re.X,
+
+          '''
+
+          if old_iopoll not in s:
+              raise SystemExit("Exact iopoll block not found")
+
+          s = s.replace(old_iopoll, "", 1)
+
+          old_iopoll_assignment = (
+              "    p->ops.iopoll = fp->f_op->iopoll ? "
+              "ksu_wrapper_iopoll : NULL;\n"
           )
 
-          s, count_iopoll_assign = re.subn(
-              r'''
-          \s*p->ops\.iopoll\s*=\s*
-          fp->f_op->iopoll\s*\?\s*
-          ksu_wrapper_iopoll\s*:\s*NULL;
-          ''',
-              '',
-              s,
-              count=1,
-              flags=re.X,
+          if old_iopoll_assignment not in s:
+              raise SystemExit("Exact iopoll assignment not found")
+
+          s = s.replace(old_iopoll_assignment, "", 1)
+
+          # --------------------------------------------------------
+          # Remove remap_file_range wrapper.
+          # Samsung 4.19 has clone_file_range/dedupe_file_range
+          # instead of the newer remap_file_range member.
+          # --------------------------------------------------------
+
+          start_marker = (
+              "// no REMAP_FILE_DEDUP: use file_in\n"
           )
 
-          # ---------------------------------------------------------
-          # Samsung 4.19 has clone_file_range/dedupe_file_range,
-          # not file_operations.remap_file_range.
-          #
-          # The wrapped fd does not require remap forwarding for KSUN's
-          # core/root/SELinux-hide functionality, so leave this optional
-          # operation unset on the old kernel.
-          # ---------------------------------------------------------
-
-          s, count_remap_func = re.subn(
-              r'''
-          //\ no\ REMAP_FILE_DEDUP:.*?
-          static\ loff_t\ ksu_wrapper_remap_file_range
-          \(.*?
-          \n\}
-          \n
-          ''',
-              '',
-              s,
-              count=1,
-              flags=re.S | re.X,
+          end_marker = (
+              "static int ksu_wrapper_fadvise"
           )
 
-          s, count_remap_assign = re.subn(
-              r'''
-          \s*p->ops\.remap_file_range\s*=\s*
-          \n?\s*fp->f_op->remap_file_range\s*\?\s*
-          ksu_wrapper_remap_file_range\s*:\s*NULL;
-          ''',
-              '',
-              s,
-              count=1,
-              flags=re.X,
+          start = s.find(start_marker)
+          end = s.find(end_marker)
+
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit("Could not locate remap_file_range block safely")
+
+          s = s[:start] + s[end:]
+
+          old_remap_assignment = (
+              "    p->ops.remap_file_range =\n"
+              "        fp->f_op->remap_file_range ? "
+              "ksu_wrapper_remap_file_range : NULL;\n"
           )
 
-          # ---------------------------------------------------------
+          if old_remap_assignment not in s:
+              raise SystemExit("Exact remap_file_range assignment not found")
+
+          s = s.replace(old_remap_assignment, "", 1)
+
+          # --------------------------------------------------------
           # security_inode_init_security_anon() is newer than this
-          # Samsung 4.19 security API.
-          #
-          # alloc_anon_inode() already allocates inode->i_security.
-          # We set the SELinux SID explicitly later in this function,
-          # so skip the newer anon initialization helper.
-          # ---------------------------------------------------------
+          # Samsung kernel. alloc_anon_inode() still allocates the
+          # inode security blob; KSUN later sets the SID explicitly.
+          # --------------------------------------------------------
 
           old_security = (
               "    error = security_inode_init_security_anon("
@@ -321,84 +322,73 @@ jobs:
               "    }\n"
           )
 
-          if old_security in s:
-              s = s.replace(
-                  old_security,
-                  "    /* Samsung 4.19: no security_inode_init_security_anon(). */\n"
-                  "    error = 0;\n",
-                  1,
-              )
-              count_security = 1
-          else:
-              count_security = 0
+          new_security = (
+              "    /* Samsung 4.19: no security_inode_init_security_anon(). */\n"
+              "    error = 0;\n"
+          )
 
-          # ---------------------------------------------------------
-          # selinux_inode() helper is newer.
-          # Samsung 4.19 stores struct inode_security_struct directly
-          # in inode->i_security.
-          # ---------------------------------------------------------
+          if old_security not in s:
+              raise SystemExit(
+                  "Exact security_inode_init_security_anon block not found"
+              )
+
+          s = s.replace(old_security, new_security, 1)
+
+          # --------------------------------------------------------
+          # Samsung SELinux 4.19 exposes inode->i_security directly.
+          # --------------------------------------------------------
 
           old_selinux_inode = (
               "    struct inode_security_struct *wrapper_sec = "
-              "selinux_inode(wrapper_inode);"
+              "selinux_inode(wrapper_inode);\n"
           )
 
           new_selinux_inode = (
               "    struct inode_security_struct *wrapper_sec =\n"
-              "        (struct inode_security_struct *)wrapper_inode->i_security;"
+              "        (struct inode_security_struct *)"
+              "wrapper_inode->i_security;\n"
           )
 
-          if old_selinux_inode in s:
-              s = s.replace(old_selinux_inode, new_selinux_inode, 1)
-              count_selinux_inode = 1
-          else:
-              count_selinux_inode = 0
+          if old_selinux_inode not in s:
+              raise SystemExit("Exact selinux_inode line not found")
 
-          print("file_wrapper patch counts:")
-          print("  iopoll function:       ", count_iopoll_func)
-          print("  iopoll assignment:     ", count_iopoll_assign)
-          print("  remap function:        ", count_remap_func)
-          print("  remap assignment:      ", count_remap_assign)
-          print("  security anon init:    ", count_security)
-          print("  selinux_inode helper:  ", count_selinux_inode)
-
-          required = {
-              "iopoll function": count_iopoll_func,
-              "iopoll assignment": count_iopoll_assign,
-              "remap function": count_remap_func,
-              "remap assignment": count_remap_assign,
-              "security anon init": count_security,
-              "selinux_inode": count_selinux_inode,
-          }
-
-          failed = [name for name, count in required.items() if count != 1]
-
-          if failed:
-              raise SystemExit(
-                  "file_wrapper compatibility patch did not match: "
-                  + ", ".join(failed)
-              )
+          s = s.replace(old_selinux_inode, new_selinux_inode, 1)
 
           p.write_text(s)
 
-          print("Samsung 4.19 file_wrapper compatibility applied")
+          print("Samsung 4.19 file_wrapper compatibility applied safely")
           PY
 
           echo
-          echo "=== Verify removed unsupported file_operations members ==="
+          echo "=== Verify file_wrapper was NOT truncated ==="
 
-          if grep -n \
-               -E 'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP' \
+          head -n 50 KernelSU-Next/kernel/infra/file_wrapper.c
+
+          grep -n \
+            '^struct ksu_file_wrapper {' \
+            KernelSU-Next/kernel/infra/file_wrapper.c
+
+          grep -n \
+            '^static int ksu_wrapper_open' \
+            KernelSU-Next/kernel/infra/file_wrapper.c
+
+          grep -n \
+            '^static ssize_t ksu_wrapper_read' \
+            KernelSU-Next/kernel/infra/file_wrapper.c
+
+          echo
+          echo "=== Verify unsupported APIs are gone ==="
+
+          if grep -n -E \
+               'f_op->iopoll|ops\.iopoll|remap_file_range|REMAP_FILE_DEDUP|security_inode_init_security_anon|selinux_inode\(' \
                KernelSU-Next/kernel/infra/file_wrapper.c; then
 
             echo "ERROR: unsupported file_wrapper API remains"
             exit 1
-          else
-            echo "iopoll/remap_file_range references removed"
           fi
 
           echo
-          echo "=== Verify SELinux 4.19 inode access ==="
+          echo "=== Verify Samsung SELinux inode access ==="
 
           grep -n \
             -A3 -B3 \
@@ -406,7 +396,7 @@ jobs:
             KernelSU-Next/kernel/infra/file_wrapper.c
 
           echo
-          echo "=== Remaining potentially unavailable nofault APIs ==="
+          echo "=== Remaining nofault APIs ==="
 
           grep -R -n \
             "_nofault" \
